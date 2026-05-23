@@ -1,3 +1,4 @@
+import os
 import io
 import zipfile
 import pandas as pd
@@ -9,6 +10,7 @@ from src.calibration import QCACalibrator
 from src.qca import BasicQCAAnalyzer
 from src.visualization import QCAVisualizer
 from src.diagnostics import QCADiagnostics
+from src.supervised_classifier import SupervisedTextConditionClassifier
 
 # ============================================================
 # Page configuration
@@ -211,15 +213,65 @@ def create_consistency_coverage_plot(truth_table_df, consistency_cutoff):
 
 st.sidebar.title("Settings")
 
-model_name = st.sidebar.selectbox(
-    "Sentence-BERT model",
-    options=[
-        "paraphrase-multilingual-MiniLM-L12-v2",
-        "distiluse-base-multilingual-cased-v2"
-    ],
+st.sidebar.subheader("Scoring method")
+
+scoring_method = st.sidebar.radio(
+    "Choose text-to-condition scoring method",
+    options=["Prototype similarity", "Supervised classifier"],
     index=0,
-    help="The default model supports multilingual text, including Chinese and English."
+    help=(
+        "Prototype similarity uses Sentence-BERT and conceptual prototypes. "
+        "Supervised classifier trains TF-IDF + Logistic Regression models from manually labeled data."
+    )
 )
+
+# Clear previous results when scoring method changes
+if "previous_scoring_method" not in st.session_state:
+    st.session_state["previous_scoring_method"] = scoring_method
+
+if st.session_state["previous_scoring_method"] != scoring_method:
+    keys_to_clear = [
+        "score_df",
+        "top_condition_df",
+        "threshold_suggestion_df",
+        "score_summary_df",
+        "fuzzy_df",
+        "crisp_df",
+        "qca_ready_df",
+        "truth_table_df",
+        "solution_df",
+        "score_fig",
+        "fuzzy_heatmap_fig",
+        "crisp_heatmap_fig",
+        "cc_fig",
+        "supervised_validation_report_df",
+        "supervised_training_report_df",
+    ]
+
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+
+    st.session_state["previous_scoring_method"] = scoring_method
+    st.info(
+        "Scoring method changed. Previous results have been cleared. "
+        "Please run the workflow again."
+    )
+
+st.sidebar.markdown("---")
+
+if scoring_method == "Prototype similarity":
+    model_name = st.sidebar.selectbox(
+        "Sentence-BERT model",
+        options=[
+            "paraphrase-multilingual-MiniLM-L12-v2",
+            "distiluse-base-multilingual-cased-v2"
+        ],
+        index=0,
+        help="The default model supports multilingual text, including Chinese and English."
+    )
+else:
+    model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 
 st.sidebar.markdown("---")
 
@@ -242,6 +294,12 @@ crisp_threshold = st.sidebar.slider(
     value=0.30,
     step=0.01
 )
+
+if scoring_method == "Supervised classifier" and crisp_threshold < 0.45:
+    st.sidebar.warning(
+        "You are using supervised classifier scores, which are probabilities. "
+        "A crisp-set threshold around 0.50 is usually more appropriate than 0.30."
+    )
 
 full_out = st.sidebar.slider(
     "Fuzzy full-out anchor",
@@ -292,20 +350,22 @@ min_cases = st.sidebar.number_input(
 # Main page
 # ============================================================
 
-st.title("Text Classification to QCA Analysis Tool")
+st.title("Text Classification to QCA Analysis Tool") 
 
-st.markdown(
-    """
-This tool converts raw text into QCA-ready conditions using prototype-based semantic scoring.
-It supports text-to-condition similarity scoring, fuzzy/crisp calibration, truth-table construction,
-consistency and coverage calculation, and basic solution configuration reporting.
+st.markdown( 
+    """ 
+This tool converts raw text into QCA-ready conditions using either prototype-based semantic scoring or supervised classifiers trained on manually labeled data. It supports text-to-condition scoring, fuzzy/crisp calibration, truth-table construction, consistency and coverage calculation, basic solution configuration reporting, reliability diagnostics, visual outputs, and result export. 
 """
 )
 
 with st.expander("Expected input format", expanded=False):
+
     st.markdown(
         """
-**Text dataset example**
+**Raw text dataset**
+
+This is the target dataset to be scored and converted into QCA-ready cases.  
+It is required for both scoring methods.
 
 ```csv
 case_id,text,outcome
@@ -313,8 +373,16 @@ case_id,text,outcome
 2,这个政策解释不清楚，居民不知道应该如何申请。,0
 3,我们愿意配合街道办开展社区宣传活动。,1
 ```
+"""
+    )
 
-**Prototype file example**
+    if scoring_method == "Prototype similarity":
+        st.markdown(
+            """
+**Prototype file**
+
+Prototype similarity mode uses conceptual prototypes to score each raw text.  
+Each row defines one QCA condition or outcome concept.
 
 ```csv
 condition_name,prototype,type
@@ -324,7 +392,28 @@ coproduction_request,The citizen shows willingness to cooperate with government.
 responsiveness,The government provides clear and concrete response. 政府提供清楚、具体且可执行的回应。,outcome
 ```
 """
-    )
+        )
+
+    elif scoring_method == "Supervised classifier":
+        st.markdown(
+            """
+**Manually labeled training data**
+
+Supervised classifier mode uses manually labeled data to train condition classifiers.  
+Each QCA condition should be represented by a separate binary 0/1 column.
+
+```csv
+case_id,text,dissatisfaction,policy_demand,coproduction_request
+L1,居民对停车收费不透明非常不满，认为管理方式不合理。,1,0,0
+L2,请问申请补贴需要提交哪些材料？,0,1,0
+L3,我们愿意配合社区开展志愿服务。,0,0,1
+L4,收费标准不透明，希望政府公开解释依据。,1,1,0
+L5,居民愿意参与整改讨论，也希望政策更加清楚。,0,1,1
+```
+
+The trained classifiers are then applied to the raw text dataset above.
+"""
+        )
 
 
 # ============================================================
@@ -333,21 +422,47 @@ responsiveness,The government provides clear and concrete response. 政府提供
 
 st.header("1. Upload Data")
 
-col1, col2 = st.columns(2)
+if scoring_method == "Prototype similarity":
+    col1, col2 = st.columns(2)
 
-with col1:
-    text_file = st.file_uploader(
-        "Upload raw text dataset (.csv)",
-        type=["csv"],
-        key="text_file"
-    )
+    with col1:
+        text_file = st.file_uploader(
+            "Upload raw text dataset (.csv)",
+            type=["csv"],
+            key="text_file"
+        )
 
-with col2:
-    prototype_file = st.file_uploader(
-        "Upload prototype file (.csv)",
-        type=["csv"],
-        key="prototype_file"
-    )
+    with col2:
+        prototype_file = st.file_uploader(
+            "Upload prototype file (.csv)",
+            type=["csv"],
+            key="prototype_file"
+        )
+
+    labeled_file = None
+
+else:
+    col1, col2 = st.columns(2)
+
+    with col1:
+        text_file = st.file_uploader(
+            "Upload raw text dataset (.csv)",
+            type=["csv"],
+            key="text_file"
+        )
+
+    with col2:
+        labeled_file = st.file_uploader(
+            "Upload manually labeled training data (.csv)",
+            type=["csv"],
+            key="labeled_file",
+            help=(
+                "Required when using the supervised classifier. "
+                "The file should contain text plus one 0/1 column for each QCA condition."
+            )
+        )
+
+    prototype_file = None
 
 use_demo = st.checkbox(
     "Use built-in demo files from the data folder",
@@ -356,54 +471,89 @@ use_demo = st.checkbox(
 
 text_df = None
 prototype_df = None
+labeled_df = None
 
 try:
     if use_demo:
         text_df = pd.read_csv("data/demo_text_data.csv")
         prototype_df = pd.read_csv("data/demo_prototypes.csv")
+
+        if os.path.exists("data/supervised_labeled_demo.csv"):
+            labeled_df = pd.read_csv("data/supervised_labeled_demo.csv")
+
         st.success("Demo files loaded from data folder.")
     else:
         if text_file is not None:
             text_df = pd.read_csv(text_file)
         if prototype_file is not None:
             prototype_df = pd.read_csv(prototype_file)
+        if labeled_file is not None:
+            labeled_df = pd.read_csv(labeled_file)
 except Exception as e:
     st.error(f"Failed to load data: {e}")
 
 if text_df is not None:
     st.subheader("Raw text dataset preview")
+    st.caption(
+        "This is the target dataset to be scored and converted into QCA-ready cases."
+    )
     st.dataframe(text_df, use_container_width=True)
 
-if prototype_df is not None:
-    st.subheader("Prototype file preview")
-    st.dataframe(prototype_df, use_container_width=True)
+if scoring_method == "Prototype similarity":
+    if prototype_df is not None:
+        st.subheader("Prototype file preview")
+        st.caption(
+            "Prototype similarity mode uses these conceptual prototypes to score each raw text."
+        )
+        st.dataframe(prototype_df, use_container_width=True)
 
-    diagnostics = QCADiagnostics()
-    prototype_check_df = diagnostics.check_prototype_quality(prototype_df)
+        diagnostics = QCADiagnostics()
+        prototype_check_df = diagnostics.check_prototype_quality(prototype_df)
 
-    st.subheader("Prototype quality check")
-    st.dataframe(prototype_check_df, use_container_width=True)
+        st.subheader("Prototype quality check")
+        st.dataframe(prototype_check_df, use_container_width=True)
 
-    if "severity" in prototype_check_df.columns:
-        if (prototype_check_df["severity"] == "error").any():
-            st.error(
-                "Prototype file contains error-level issues. "
-                "Please fix them before interpreting the results."
-            )
-        elif (prototype_check_df["severity"] == "warning").any():
-            st.warning(
-                "Prototype file contains warning-level issues. "
-                "The workflow can run, but results should be interpreted carefully."
-            )
-        else:
-            st.success("Prototype quality check passed.")
+        if "severity" in prototype_check_df.columns:
+            if (prototype_check_df["severity"] == "error").any():
+                st.error(
+                    "Prototype file contains error-level issues. "
+                    "Please fix them before interpreting the results."
+                )
+            elif (prototype_check_df["severity"] == "warning").any():
+                st.warning(
+                    "Prototype file contains warning-level issues. "
+                    "The workflow can run, but results should be interpreted carefully."
+                )
+            else:
+                st.success("Prototype quality check passed.")
+    else:
+        st.info("Prototype similarity mode requires a prototype file.")
 
+elif scoring_method == "Supervised classifier":
+    if labeled_df is not None:
+        st.subheader("Manually labeled training data preview")
+        st.caption(
+            "Supervised classifier mode uses this labeled dataset to train condition classifiers. "
+            "The trained classifiers are then applied to the raw text dataset above."
+        )
+        st.dataframe(labeled_df, use_container_width=True)
+    else:
+        st.info("Supervised classifier mode requires manually labeled training data.")
 
 # ============================================================
 # Column selection and workflow
 # ============================================================
 
-if text_df is not None and prototype_df is not None:
+ready_for_workflow = (
+    text_df is not None
+    and (
+        (scoring_method == "Prototype similarity" and prototype_df is not None)
+        or
+        (scoring_method == "Supervised classifier" and labeled_df is not None)
+    )
+)
+
+if ready_for_workflow:
     st.header("2. Select Columns")
 
     available_columns = text_df.columns.tolist()
@@ -441,21 +591,61 @@ if text_df is not None and prototype_df is not None:
 
     if run_button:
         try:
+            for key in [
+                "supervised_validation_report_df",
+                "supervised_training_report_df"
+            ]:
+                if key in st.session_state:
+                    del st.session_state[key]
             # --------------------------------------------
             # Step 1: Text scoring
             # --------------------------------------------
-            with st.spinner("Encoding texts and prototypes..."):
-                scorer = load_scorer(model_name)
+            if scoring_method == "Prototype similarity":
+                with st.spinner("Encoding texts and prototypes..."):
+                    scorer = load_scorer(model_name)
 
-                score_df = scorer.score_texts(
-                    text_df=text_df,
-                    prototype_df=prototype_df,
-                    text_column=text_column,
-                    include_outcome_prototype=False
-                )
+                    score_df = scorer.score_texts(
+                        text_df=text_df,
+                        prototype_df=prototype_df,
+                        text_column=text_column,
+                        include_outcome_prototype=False
+                    )
 
-            st.success("Text-to-condition scoring completed.")
+                st.success("Prototype-based text-to-condition scoring completed.")
 
+            else:
+                if labeled_df is None:
+                    raise ValueError(
+                        "Supervised classifier selected, but no manually labeled training data was provided."
+                    )
+
+                with st.spinner("Training supervised classifier and predicting condition scores..."):
+                    condition_columns = [
+                        col for col in labeled_df.columns
+                        if col not in ["case_id", text_column, "outcome", "label", "target_label"]
+                    ]
+
+                    supervised_clf = SupervisedTextConditionClassifier(
+                        text_column=text_column,
+                        condition_columns=condition_columns
+                    )
+
+                    validation_report_df = supervised_clf.validate_labeled_data(labeled_df)
+
+                    if (validation_report_df["severity"] == "error").any():
+                        st.dataframe(validation_report_df, use_container_width=True)
+                        raise ValueError(
+                            "Labeled training data contains error-level issues. Please fix them before training."
+                        )
+
+                    supervised_clf.fit(labeled_df)
+
+                    score_df = supervised_clf.predict_scores(text_df)
+
+                    st.session_state["supervised_validation_report_df"] = validation_report_df
+                    st.session_state["supervised_training_report_df"] = supervised_clf.training_report_
+
+                st.success("Supervised text-to-condition scoring completed.")
             # --------------------------------------------
             # Diagnostic step: score explanations and threshold suggestions
             # --------------------------------------------
@@ -570,6 +760,17 @@ if text_df is not None and prototype_df is not None:
             st.session_state["fuzzy_heatmap_fig"] = fuzzy_heatmap_fig
             st.session_state["crisp_heatmap_fig"] = crisp_heatmap_fig
             st.session_state["cc_fig"] = cc_fig
+            # Save the settings used for the current results
+            st.session_state["last_run_settings"] = {
+                "scoring_method": scoring_method,
+                "calibration_method": calibration_method,
+                "crisp_threshold": crisp_threshold,
+                "full_out": full_out,
+                "crossover": crossover,
+                "full_in": full_in,
+                "consistency_cutoff": consistency_cutoff,
+                "min_cases": min_cases,
+            }
 
         except Exception as e:
             st.error(f"Analysis failed: {e}")
@@ -580,12 +781,39 @@ if text_df is not None and prototype_df is not None:
 # ============================================================
 
 if "score_df" in st.session_state:
+
+    current_settings = {
+        "scoring_method": scoring_method,
+        "calibration_method": calibration_method,
+        "crisp_threshold": crisp_threshold,
+        "full_out": full_out,
+        "crossover": crossover,
+        "full_in": full_in,
+        "consistency_cutoff": consistency_cutoff,
+        "min_cases": min_cases,
+    }
+
+    last_run_settings = st.session_state.get("last_run_settings", None)
+
+    if last_run_settings is not None and current_settings != last_run_settings:
+        changed_items = [
+            key for key in current_settings
+            if current_settings[key] != last_run_settings.get(key)
+        ]
+
+        st.warning(
+            "The current sidebar settings differ from the settings used to generate "
+            "the displayed results. Please click **Run full workflow** again to update "
+            "the results. Changed setting(s): "
+            + ", ".join(changed_items)
+        )
+
     st.header("4. Intermediate Results and Diagnostics")
 
     tab0, tab1, tab2, tab3, tab4 = st.tabs(
         [
             "Diagnostics",
-            "Similarity scores",
+            "Condition scores",
             "Fuzzy membership",
             "Crisp membership",
             "QCA-ready dataset"
@@ -593,6 +821,20 @@ if "score_df" in st.session_state:
     )
 
     with tab0:
+        if "supervised_validation_report_df" in st.session_state:
+            st.subheader("Supervised classifier validation report")
+            st.dataframe(
+                st.session_state["supervised_validation_report_df"],
+                use_container_width=True
+            )
+
+        if "supervised_training_report_df" in st.session_state:
+            st.subheader("Supervised classifier training report")
+            st.dataframe(
+                st.session_state["supervised_training_report_df"],
+                use_container_width=True
+            )
+
         st.subheader("Top-matched condition explanation")
 
         st.markdown(
@@ -638,7 +880,11 @@ make final calibration choices based on theory, data distribution, and substanti
         )
 
     with tab1:
-        st.subheader("Similarity score table")
+        st.subheader("Condition score table")
+        st.caption(
+            "In prototype similarity mode, these values are semantic similarity scores. "
+            "In supervised classifier mode, these values are predicted condition probabilities."
+        )
         st.dataframe(st.session_state["score_df"], use_container_width=True)
         st.download_button(
             "Download score_table.csv",
@@ -726,29 +972,55 @@ make final calibration choices based on theory, data distribution, and substanti
 
     st.header("7. Download All Results")
 
-    output_zip = create_zip_from_outputs(
+    analysis_settings_df = pd.DataFrame([
         {
-            "score_table.csv": st.session_state["score_df"],
-            "top_condition_explanation.csv": st.session_state["top_condition_df"],
-            "threshold_suggestions.csv": st.session_state["threshold_suggestion_df"],
-            "score_distribution_summary.csv": st.session_state["score_summary_df"],
-            "calibrated_membership_table_fuzzy.csv": st.session_state["fuzzy_df"],
-            "calibrated_membership_table_crisp.csv": st.session_state["crisp_df"],
-            "qca_ready_dataset.csv": st.session_state["qca_ready_df"],
-            "truth_table.csv": st.session_state["truth_table_df"],
-            "solution_configurations.csv": st.session_state["solution_df"],
-            "README_result_note.txt": (
-                "This zip file contains outputs generated by the Text Classification "
-                "to QCA Analysis Tool. The workflow includes prototype-based semantic "
-                "scoring, reliability diagnostics, fuzzy/crisp calibration, QCA-ready "
-                "dataset construction, truth-table analysis, consistency/coverage "
-                "calculation, and solution configuration reporting."
-            )
+            "scoring_method": scoring_method,
+            "crisp_threshold": crisp_threshold,
+            "fuzzy_full_out": full_out,
+            "fuzzy_crossover": crossover,
+            "fuzzy_full_in": full_in,
+            "consistency_cutoff": consistency_cutoff,
+            "min_cases": min_cases
         }
+    ])
+
+    output_files = {
+        "analysis_settings.csv": analysis_settings_df,
+        "score_table.csv": st.session_state["score_df"],
+        "top_condition_explanation.csv": st.session_state["top_condition_df"],
+        "threshold_suggestions.csv": st.session_state["threshold_suggestion_df"],
+        "score_distribution_summary.csv": st.session_state["score_summary_df"],
+        "calibrated_membership_table_fuzzy.csv": st.session_state["fuzzy_df"],
+        "calibrated_membership_table_crisp.csv": st.session_state["crisp_df"],
+        "qca_ready_dataset.csv": st.session_state["qca_ready_df"],
+        "truth_table.csv": st.session_state["truth_table_df"],
+        "solution_configurations.csv": st.session_state["solution_df"],
+    }
+
+    if "supervised_validation_report_df" in st.session_state:
+        output_files["supervised_validation_report.csv"] = st.session_state[
+            "supervised_validation_report_df"
+        ]
+
+    if "supervised_training_report_df" in st.session_state:
+        output_files["supervised_training_report.csv"] = st.session_state[
+            "supervised_training_report_df"
+        ]
+
+    output_files["README_result_note.txt"] = (
+        "This zip file contains outputs generated by the Text Classification "
+        "to QCA Analysis Tool. The workflow includes text-to-condition scoring, "
+        "reliability diagnostics, fuzzy/crisp calibration, QCA-ready dataset "
+        "construction, truth-table analysis, consistency/coverage calculation, "
+        "and solution configuration reporting. If the supervised classifier mode "
+        "was used, the zip file also includes supervised classifier validation "
+        "and training reports."
     )
 
+    output_zip = create_zip_from_outputs(output_files)
+
     st.download_button(
-        "Download all CSV results as ZIP",
+        "Download all results as ZIP",
         data=output_zip,
         file_name="text_qca_results.zip",
         mime="application/zip"
@@ -763,8 +1035,9 @@ st.markdown("---")
 
 st.markdown(
     """
-**Method note.** This tool uses prototype-based semantic similarity to score texts against conceptual categories.
-Calibration thresholds should be treated as research-design choices. Researchers should inspect raw scores,
-membership tables, and truth-table results before interpreting configurations substantively.
+**Method note.** This tool supports two text-to-condition scoring strategies: prototype-based semantic similarity
+and supervised classification trained on manually labeled data. Calibration thresholds should be treated as
+research-design choices. Researchers should inspect raw scores, membership tables, training diagnostics,
+and truth-table results before interpreting configurations substantively.
 """
 )
