@@ -1,0 +1,5 @@
+condition_name,prototype,type
+dissatisfaction,The citizen complains about a public problem or expresses dissatisfaction frustration disappointment anger or lack of transparency. 公民表达不满意、抱怨、投诉、失望、愤怒，指出问题长期没有解决、收费不透明、管理不合理、设施不足或政府处理不到位。,condition
+policy_demand,The citizen asks for policy clarification adjustment implementation or government action. 公民要求政府解释政策、调整政策、明确申请条件、改进执行流程或采取具体行动。,condition
+coproduction_request,The citizen shows willingness to cooperate participate volunteer or co-produce public services with government. 公民愿意配合政府、参与社区治理、提供志愿服务、共同完成公共服务或协助政策执行。,condition
+responsiveness,The government provides a clear concrete respectful and actionable response. 政府提供清楚、具体、尊重且可执行的回应，包括流程、时间安排、责任部门或解决方案。,outcome

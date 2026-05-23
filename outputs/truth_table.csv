@@ -1,0 +1,7 @@
+﻿dissatisfaction,policy_demand,coproduction_request,configuration,n_cases,outcome_positive_cases,consistency,raw_coverage,cases,status
+0,1,0,~dissatisfaction * policy_demand * ~coproduction_request,2,1,0.5,0.1667,"2, 10",contradictory
+0,1,1,~dissatisfaction * policy_demand * coproduction_request,2,2,1.0,0.3333,"4, 6",sufficient
+1,1,1,dissatisfaction * policy_demand * coproduction_request,2,2,1.0,0.3333,"1, 7",sufficient
+0,0,1,~dissatisfaction * ~policy_demand * coproduction_request,1,1,1.0,0.1667,3,sufficient
+1,0,0,dissatisfaction * ~policy_demand * ~coproduction_request,2,0,0.0,0.0,"5, 9",weak
+0,0,0,~dissatisfaction * ~policy_demand * ~coproduction_request,1,0,0.0,0.0,8,weak
