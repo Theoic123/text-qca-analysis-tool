@@ -90,7 +90,7 @@ streamlit run app.py
 The app will open in the browser. If it does not open automatically, visit:
 
 ```text
-http://localhost:8501
+[http://localhost:8501](https://text-qca-analysis-tool.streamlit.app/)
 ```
 
 ---
