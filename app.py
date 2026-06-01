@@ -12,6 +12,7 @@ from src.visualization import QCAVisualizer
 from src.diagnostics import QCADiagnostics
 from src.supervised_classifier import SupervisedTextConditionClassifier
 from src.prototype_explainer import RichTextPrototypeExplainer
+from src.threshold_sensitivity import ThresholdSensitivityAnalyzer
 
 # ============================================================
 # Page configuration
@@ -64,6 +65,30 @@ def create_zip_from_outputs(output_dict):
     zip_buffer.seek(0)
     return zip_buffer
 
+def parse_threshold_grid(threshold_grid_text):
+    """
+    Parse comma-separated threshold grid from sidebar input.
+    """
+    try:
+        thresholds = [
+            float(x.strip())
+            for x in threshold_grid_text.split(",")
+            if x.strip() != ""
+        ]
+
+        thresholds = sorted(list(set(thresholds)))
+
+        if not thresholds:
+            raise ValueError("Threshold grid is empty.")
+
+        for threshold in thresholds:
+            if threshold < 0 or threshold > 1:
+                raise ValueError("All thresholds must be between 0 and 1.")
+
+        return thresholds
+
+    except Exception as e:
+        raise ValueError(f"Invalid threshold grid: {e}")
 
 def create_score_distribution_plot(score_df, crisp_threshold):
     """
@@ -248,6 +273,10 @@ if st.session_state["previous_scoring_method"] != scoring_method:
         "supervised_validation_report_df",
         "supervised_training_report_df",
         "rich_explanation_df",
+        "sensitivity_summary_df",
+        "sensitivity_detail_df",
+        "sensitivity_solution_df",
+        "configuration_stability_df",
     ]
 
     for key in keys_to_clear:
@@ -347,6 +376,24 @@ min_cases = st.sidebar.number_input(
     step=1
 )
 
+st.sidebar.markdown("---")
+
+st.sidebar.subheader("Threshold sensitivity")
+
+run_threshold_sensitivity = st.sidebar.checkbox(
+    "Run threshold sensitivity analysis",
+    value=True,
+    help=(
+        "Test how QCA results change across multiple crisp-set thresholds. "
+        "This helps evaluate whether configurations are robust to calibration choices."
+    )
+)
+
+threshold_grid_text = st.sidebar.text_input(
+    "Threshold grid",
+    value="0.25,0.30,0.35,0.40,0.45,0.50",
+    help="Comma-separated crisp-set thresholds to test."
+)
 
 # ============================================================
 # Main page
@@ -597,6 +644,10 @@ if ready_for_workflow:
                 "supervised_validation_report_df",
                 "supervised_training_report_df",
                 "rich_explanation_df",
+                "sensitivity_summary_df",
+                "sensitivity_detail_df",
+                "sensitivity_solution_df",
+                "configuration_stability_df",
             ]:
                 if key in st.session_state:
                     del st.session_state[key]
@@ -731,6 +782,41 @@ if ready_for_workflow:
             st.success("Truth table and solution configurations generated.")
 
             # --------------------------------------------
+            # Step 3.5: Threshold sensitivity analysis
+            # --------------------------------------------
+            if run_threshold_sensitivity:
+                thresholds = parse_threshold_grid(threshold_grid_text)
+
+                sensitivity_analyzer = ThresholdSensitivityAnalyzer(
+                    thresholds=thresholds,
+                    consistency_cutoff=consistency_cutoff,
+                    min_cases=min_cases,
+                    contradiction_lower=0.40,
+                    contradiction_upper=0.60
+                )
+
+                sensitivity_summary_df, sensitivity_detail_df, sensitivity_solution_df = (
+                    sensitivity_analyzer.run(
+                        score_df=score_df,
+                        outcome_column=outcome_column,
+                        case_id_column=case_id_column
+                    )
+                )
+
+                configuration_stability_df = (
+                    sensitivity_analyzer.create_configuration_stability_table(
+                        sensitivity_detail_df
+                    )
+                )
+
+                st.session_state["sensitivity_summary_df"] = sensitivity_summary_df
+                st.session_state["sensitivity_detail_df"] = sensitivity_detail_df
+                st.session_state["sensitivity_solution_df"] = sensitivity_solution_df
+                st.session_state["configuration_stability_df"] = configuration_stability_df
+
+                st.success("Threshold sensitivity analysis completed.")
+
+            # --------------------------------------------
             # Step 4: Figures
             # --------------------------------------------
             score_fig = create_score_distribution_plot(
@@ -785,6 +871,8 @@ if ready_for_workflow:
                 "full_in": full_in,
                 "consistency_cutoff": consistency_cutoff,
                 "min_cases": min_cases,
+                "run_threshold_sensitivity": run_threshold_sensitivity,
+                "threshold_grid_text": threshold_grid_text,
             }
 
         except Exception as e:
@@ -806,6 +894,8 @@ if "score_df" in st.session_state:
         "full_in": full_in,
         "consistency_cutoff": consistency_cutoff,
         "min_cases": min_cases,
+        "run_threshold_sensitivity": run_threshold_sensitivity,
+        "threshold_grid_text": threshold_grid_text,
     }
 
     last_run_settings = st.session_state.get("last_run_settings", None)
@@ -962,7 +1052,13 @@ make final calibration choices based on theory, data distribution, and substanti
 
     st.header("5. QCA Results")
 
-    tab5, tab6 = st.tabs(["Truth table", "Solution configurations"])
+    tab5, tab6, tab7 = st.tabs(
+        [
+            "Truth table",
+            "Solution configurations",
+            "Threshold sensitivity"
+        ]
+    )
 
     with tab5:
         st.subheader("Truth table")
@@ -983,6 +1079,92 @@ make final calibration choices based on theory, data distribution, and substanti
             file_name="solution_configurations.csv",
             mime="text/csv"
         )
+
+    with tab7:
+        if "sensitivity_summary_df" in st.session_state:
+            st.subheader("Threshold sensitivity summary")
+
+            st.markdown(
+                """
+This table shows how QCA results change across different crisp-set thresholds.
+A stable result should not depend strongly on one single threshold value.
+"""
+            )
+
+            st.dataframe(
+                st.session_state["sensitivity_summary_df"],
+                use_container_width=True
+            )
+
+            st.download_button(
+                "Download threshold_sensitivity_summary.csv",
+                data=convert_df_to_csv_bytes(st.session_state["sensitivity_summary_df"]),
+                file_name="threshold_sensitivity_summary.csv",
+                mime="text/csv"
+            )
+
+            st.subheader("Configuration stability table")
+
+            st.markdown(
+                """
+This table shows whether each configuration remains sufficient, contradictory,
+or weak across multiple thresholds. Configurations that remain sufficient across
+several nearby thresholds are more robust.
+"""
+            )
+
+            st.dataframe(
+                st.session_state["configuration_stability_df"],
+                use_container_width=True
+            )
+
+            st.download_button(
+                "Download configuration_stability_table.csv",
+                data=convert_df_to_csv_bytes(st.session_state["configuration_stability_df"]),
+                file_name="configuration_stability_table.csv",
+                mime="text/csv"
+            )
+
+            with st.expander("Detailed threshold-level truth tables"):
+                st.dataframe(
+                    st.session_state["sensitivity_detail_df"],
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    "Download threshold_sensitivity_details.csv",
+                    data=convert_df_to_csv_bytes(st.session_state["sensitivity_detail_df"]),
+                    file_name="threshold_sensitivity_details.csv",
+                    mime="text/csv"
+                )
+
+            with st.expander("Threshold-level sufficient solutions"):
+                if (
+                    "sensitivity_solution_df" in st.session_state
+                    and not st.session_state["sensitivity_solution_df"].empty
+                ):
+                    st.dataframe(
+                        st.session_state["sensitivity_solution_df"],
+                        use_container_width=True
+                    )
+
+                    st.download_button(
+                        "Download threshold_sensitivity_solutions.csv",
+                        data=convert_df_to_csv_bytes(st.session_state["sensitivity_solution_df"]),
+                        file_name="threshold_sensitivity_solutions.csv",
+                        mime="text/csv",
+                        key="download_threshold_sensitivity_solutions"
+                    )
+                else:
+                    st.info(
+                        "No sufficient configurations were found under the tested thresholds."
+                    )
+
+        else:
+            st.info(
+                "Threshold sensitivity analysis was not run. "
+                "Enable it in the sidebar and run the workflow again."
+            )
 
     st.header("6. Figures")
 
@@ -1009,17 +1191,23 @@ make final calibration choices based on theory, data distribution, and substanti
 
     st.header("7. Download All Results")
 
-    analysis_settings_df = pd.DataFrame([
+    analysis_settings = st.session_state.get(
+        "last_run_settings",
         {
             "scoring_method": scoring_method,
+            "calibration_method": calibration_method,
             "crisp_threshold": crisp_threshold,
-            "fuzzy_full_out": full_out,
-            "fuzzy_crossover": crossover,
-            "fuzzy_full_in": full_in,
+            "full_out": full_out,
+            "crossover": crossover,
+            "full_in": full_in,
             "consistency_cutoff": consistency_cutoff,
-            "min_cases": min_cases
+            "min_cases": min_cases,
+            "run_threshold_sensitivity": run_threshold_sensitivity,
+            "threshold_grid_text": threshold_grid_text,
         }
-    ])
+    )
+
+    analysis_settings_df = pd.DataFrame([analysis_settings])
 
     output_files = {
         "analysis_settings.csv": analysis_settings_df,
@@ -1049,15 +1237,36 @@ make final calibration choices based on theory, data distribution, and substanti
             "rich_explanation_df"
         ]
 
+    if "sensitivity_summary_df" in st.session_state:
+        output_files["threshold_sensitivity_summary.csv"] = st.session_state[
+            "sensitivity_summary_df"
+        ]
+
+    if "sensitivity_detail_df" in st.session_state:
+        output_files["threshold_sensitivity_details.csv"] = st.session_state[
+            "sensitivity_detail_df"
+        ]
+
+    if "sensitivity_solution_df" in st.session_state:
+        output_files["threshold_sensitivity_solutions.csv"] = st.session_state[
+            "sensitivity_solution_df"
+        ]
+
+    if "configuration_stability_df" in st.session_state:
+        output_files["configuration_stability_table.csv"] = st.session_state[
+            "configuration_stability_df"
+        ]
+
     output_files["README_result_note.txt"] = (
         "This zip file contains outputs generated by the Text Classification "
         "to QCA Analysis Tool. The workflow includes text-to-condition scoring, "
         "reliability diagnostics, fuzzy/crisp calibration, QCA-ready dataset "
         "construction, truth-table analysis, consistency/coverage calculation, "
-        "and solution configuration reporting. If the supervised classifier mode "
-        "was used, the zip file also includes supervised classifier validation "
-        "and training reports. If the prototype similarity mode was used, the zip "
-        "file may also include rich text-prototype match explanations."
+        "solution configuration reporting, and optional threshold sensitivity "
+        "analysis. If the supervised classifier mode was used, the zip file also "
+        "includes supervised classifier validation and training reports. If the "
+        "prototype similarity mode was used, the zip file may also include rich "
+        "text-prototype match explanations."
     )
 
     output_zip = create_zip_from_outputs(output_files)
